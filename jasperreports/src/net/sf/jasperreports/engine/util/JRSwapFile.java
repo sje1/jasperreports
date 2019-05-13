@@ -151,18 +151,21 @@ public class JRSwapFile
 	 */
 	public SwapHandle write(byte[] data) throws IOException
 	{
-		int blockCount = (data.length - 1) / blockSize + 1;
-		long[] offsets = reserveFreeBlocks(blockCount);
-		int lastBlockSize = (data.length - 1) % blockSize + 1;
-		SwapHandle handle = new SwapHandle(offsets, lastBlockSize);
-		for (int i = 0; i < blockCount; ++i)
+		synchronized (this)
 		{
-			int dataSize = i < blockCount - 1 ? blockSize : lastBlockSize;
-			int dataOffset = i * blockSize;			
-			write(data, dataSize, dataOffset, offsets[i]);
+			int blockCount = (data.length - 1) / blockSize + 1;
+			long[] offsets = reserveFreeBlocks(blockCount);
+			int lastBlockSize = (data.length - 1) % blockSize + 1;
+			SwapHandle handle = new SwapHandle(offsets, lastBlockSize);
+			for (int i = 0; i < blockCount; ++i)
+			{
+				int dataSize = i < blockCount - 1 ? blockSize : lastBlockSize;
+				int dataOffset = i * blockSize;			
+				write(data, dataSize, dataOffset, offsets[i]);
+			}
+			
+			return handle;
 		}
-		
-		return handle;
 	}
 
 
@@ -223,9 +226,22 @@ public class JRSwapFile
 	 */
 	public void free(SwapHandle handle)
 	{
-		freeBlocks(handle.getOffsets());
+		synchronized (this)
+		{
+			freeBlocks(handle.getOffsets());
+		}
 	}
 	
+	private boolean disposed;
+	
+	/**
+	 * If this swap file has been disposed.
+	 * This would mean the dispose has been called, and the file should be closed and deleted.
+	 * @return boolean dispose has been called
+	 */
+	boolean isDisposed() {
+		return disposed;
+	}
 	
 	/**
 	 * Closes and deletes the swap file.
@@ -256,6 +272,7 @@ public class JRSwapFile
 				}
 			}
 		}
+		disposed = true;
 	}
 
 

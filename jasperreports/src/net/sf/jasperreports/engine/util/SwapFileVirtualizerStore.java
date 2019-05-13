@@ -31,6 +31,7 @@ import java.io.OutputStream;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 
 import net.sf.jasperreports.engine.JRRuntimeException;
 import net.sf.jasperreports.engine.JRVirtualizable;
@@ -53,6 +54,17 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 	private final boolean swapOwner;
 	private final Map<String,JRSwapFile.SwapHandle> handles;
 	private final StreamCompression compression;
+	
+	
+	/**
+	 * A flag for the dispose behavior
+	 * By default (the current behavior), dispose will remove the swap and file even with handles left unread/unremoved.
+	 * Setting this flag to true will leave the file if there are still handles.
+	 * This can help leave the store if one thread disposes a store, but another thread might still
+	 * request a pageIn of a handle it has in the store later.
+	 * A pageIn that cannot find a handle is a fatal error causing a report generation error.
+	 */
+	private boolean disposeOnlyWithEmptyHandles = false;
 
 	public SwapFileVirtualizerStore(JRSwapFile swap, boolean swapOwner)
 	{
@@ -78,6 +90,19 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 		return handles.containsKey(o.getUID());
 	}
 	
+	public void setDisposeOnlyWithEmptyHandles(boolean b) 
+	{
+		this.disposeOnlyWithEmptyHandles = b;
+	}
+
+	public boolean isDisposeOnlyWithEmptyHandles() 
+	{
+		return disposeOnlyWithEmptyHandles;
+	}
+
+	private static final ReentrantLock serializeLock = new ReentrantLock();
+	
+	
 	@Override
 	public boolean store(JRVirtualizable<?> o, VirtualizationSerializer serializer)
 	{
@@ -94,7 +119,12 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 		{
 			ByteArrayOutputStream bout = new ByteArrayOutputStream(3000);
 			OutputStream out = compression == null ? bout : compression.compressedOutput(bout);
-			serializer.writeData(o, out);
+			serializeLock.lock(); // need to lock here for thread safety
+			try {
+				serializer.writeData(o, out);
+			} finally {
+				serializeLock.unlock();
+			}
 			out.close();
 			
 			byte[] data = bout.toByteArray();
@@ -184,6 +214,35 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 		}
 	}
 
+	private boolean disposed = false;
+	
+	/**
+	 * If the store has been disposed (dispose has been called at least once).
+	 * This does not mean the swap file underlying has been disposed, only if it is the owner if the swap file
+	 * @return boolean If dispose has been called on this file store.
+	 */
+	public boolean isDisposed() {
+		return disposed;
+	}
+
+	/**
+	 * If the underlying swap file has been disposed.
+	 * This does not mean the swap file underlying has been disposed, only if it is the owner if the swap file
+	 * This will be true if dispose has been called, and this swap store is the owner of the swap file. 
+	 * @return boolean If the underlying swap file has been disposed.
+	 */
+	public boolean isSwapFileDisposed() {
+		return swap.isDisposed();
+	}
+	
+	/**
+	 * If this swap has uids (handles).
+	 * A store call will register a handle (uid), and a retrieve with remove, or a remove will remove the uid handle.
+	 * @return boolean if there any handles currently in this swap store.
+	 */
+	public boolean hasHandles() {
+		return handles.isEmpty();
+	}
 
 	/**
 	 * Disposes the swap file used if this virtualizer owns it.
@@ -192,6 +251,15 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 	@Override
 	public void dispose()
 	{
+		// new optional check...ignore dispose if there are handles present
+		if(disposeOnlyWithEmptyHandles) 
+		{
+			if(!handles.isEmpty()) 
+			{
+				return;
+			}
+		}
+		
 		handles.clear();
 		if (swapOwner)
 		{
@@ -202,5 +270,6 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 			
 			swap.dispose();
 		}
+		disposed = true;
 	}
 }

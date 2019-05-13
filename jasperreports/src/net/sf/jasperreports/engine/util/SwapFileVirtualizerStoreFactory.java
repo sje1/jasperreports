@@ -37,11 +37,22 @@ public class SwapFileVirtualizerStoreFactory implements VirtualizerStoreFactory
 	private int minGrowCount = 20;//default value
 	private StreamCompression compression;
 	
+	/**
+	 * A flag for the dispose behavior
+	 * By default (the existing behavior), dispose will remove the swap and file even with handles left unread/unremoved.
+	 * Setting this flag to true will leave the file while there are still handles.
+	 * This can help leave the store if one thread disposes a store, but another thread might still
+	 * request a pageIn of a handle it has in the store later.
+	 */
+	private boolean disposeOnlyWithEmptyHandles = false;
+
 	@Override
 	public VirtualizerStore createStore(JRVirtualizationContext virtualizationContext)
 	{
 		JRSwapFile swapFile = new JRSwapFile(directory, blockSize, minGrowCount);
-		return new SwapFileVirtualizerStore(swapFile, true, compression);
+		SwapFileVirtualizerStore store = new SwapFileVirtualizerStore(swapFile, true, compression);
+		store.setDisposeOnlyWithEmptyHandles(disposeOnlyWithEmptyHandles);
+		return store;
 	}
 
 	public String getDirectory()
@@ -82,5 +93,15 @@ public class SwapFileVirtualizerStoreFactory implements VirtualizerStoreFactory
 	public void setCompression(StreamCompression compression)
 	{
 		this.compression = compression;
+	}
+
+	public boolean isDisposeOnlyWithEmptyHandles() 
+	{
+		return disposeOnlyWithEmptyHandles;
+	}
+
+	public void setDisposeOnlyWithEmptyHandles(boolean disposeOnlyWithEmptyHandles) 
+	{
+		this.disposeOnlyWithEmptyHandles = disposeOnlyWithEmptyHandles;
 	}
 }

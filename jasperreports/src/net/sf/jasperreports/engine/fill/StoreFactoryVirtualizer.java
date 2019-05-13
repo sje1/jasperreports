@@ -24,7 +24,10 @@
 package net.sf.jasperreports.engine.fill;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.collections4.map.ReferenceMap;
 import org.apache.commons.logging.Log;
@@ -32,6 +35,7 @@ import org.apache.commons.logging.LogFactory;
 
 import net.sf.jasperreports.engine.JRRuntimeException;
 import net.sf.jasperreports.engine.JRVirtualizable;
+import net.sf.jasperreports.engine.util.SwapFileVirtualizerStore;
 
 
 /**
@@ -43,8 +47,9 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 	public static final String EXCEPTION_MESSAGE_KEY_STORE_NOT_FOUND = "fill.virtualizer.store.not.found";
 	
 	private final VirtualizerStoreFactory storeFactory;
-	private final ReferenceMap<JRVirtualizationContext, VirtualizerStore> contextStores;
-	
+	private final ReentrantLock contextStoresLock = new ReentrantLock();
+	private final Map<JRVirtualizationContext, VirtualizerStore> contextStores;
+
 	public StoreFactoryVirtualizer(int maxSize, VirtualizerStoreFactory storeFactory)
 	{
 		super(maxSize);
@@ -52,9 +57,9 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 		this.storeFactory = storeFactory;
 		
 		this.contextStores = 
-			new ReferenceMap<JRVirtualizationContext, VirtualizerStore>(
+			Collections.synchronizedMap(new ReferenceMap<JRVirtualizationContext, VirtualizerStore>(
 				ReferenceMap.ReferenceStrength.WEAK, ReferenceMap.ReferenceStrength.HARD
-				);
+				));
 	}
 
 	protected VirtualizerStore store(JRVirtualizable o, boolean create)
@@ -63,78 +68,126 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 		return store(masterContext, create);
 	}
 
+	private boolean isDisposedForRemoval(VirtualizerStore store) {
+		if(store == null) return true;
+		if(store instanceof SwapFileVirtualizerStore) {
+			SwapFileVirtualizerStore swapStore = (SwapFileVirtualizerStore)store;
+			return swapStore.isSwapFileDisposed();
+		}
+		return false;
+	}
+	
 	protected VirtualizerStore store(JRVirtualizationContext context, boolean create)
 	{
-		VirtualizerStore store = contextStores.get(context);
-		if (store != null || !create)
+		contextStoresLock.lock(); // need a lock around get/create/put of map
+		try 
 		{
-			if (log.isTraceEnabled())
+			VirtualizerStore store = contextStores.get(context);
+			
+			// bit of a hack here to not return a disposed store, just return null so a new one can be created
+			if(store != null && isDisposedForRemoval(store)) {
+				if(log.isDebugEnabled())
+				{
+					log.debug("got disposed swap file store, will create a new one: " + store);
+				}
+				store = null;
+			}
+
+			if (store != null || !create)
 			{
-				log.trace("found " + store + " for " + context);
+				if (log.isTraceEnabled())
+				{
+					log.trace("found " + store + " for " + context);
+				}
+				
+				return store;
 			}
 			
+			//the context should be locked at this moment
+			store = storeFactory.createStore(context);
+			if (log.isDebugEnabled())
+			{
+				log.debug("created " + store + " for " + context);
+			}
+
+			// TODO lucianc 
+			// do we need to keep a weak reference to the context, and dispose the store when the reference is cleared?
+			// not doing that for now, assuming that store objects are disposed when garbage collected.
+			contextStores.put(context, store);
+
 			return store;
 		}
-		
-		//the context should be locked at this moment
-		store = storeFactory.createStore(context);
-		if (log.isDebugEnabled())
+		finally
 		{
-			log.debug("created " + store + " for " + context);
+			contextStoresLock.unlock();
 		}
-		
-		// TODO lucianc 
-		// do we need to keep a weak reference to the context, and dispose the store when the reference is cleared?
-		// not doing that for now, assuming that store objects are disposed when garbage collected.
-		synchronized (contextStores)
-		{
-			contextStores.put(context, store);
-		}
-		
-		return store;
 	}
 	
 	@Override
 	protected void pageOut(JRVirtualizable o) throws IOException
 	{
-		VirtualizerStore store = store(o, true);
-		boolean stored = store.store(o, serializer);
-		if (!stored && !isReadOnly(o))
+		o.getContext().lock();
+		try 
 		{
-			throw new IllegalStateException("Cannot virtualize data because the data for object UID \"" + o.getUID() + "\" already exists.");
+			VirtualizerStore store = store(o, true);
+			boolean stored = store.store(o, serializer);
+			if (!stored && !isReadOnly(o))
+			{
+				throw new IllegalStateException("Cannot virtualize data because the data for object UID \"" + o.getUID() + "\" already exists.");
+			}
+		}
+		finally 
+		{
+			o.getContext().unlock();
 		}
 	}
 
 	@Override
 	protected void pageIn(JRVirtualizable o) throws IOException
 	{
-		VirtualizerStore store = store(o, false);
-		if (store == null)
+		o.getContext().lock();
+		try 
 		{
-			throw 
-				new JRRuntimeException(
-					EXCEPTION_MESSAGE_KEY_STORE_NOT_FOUND,
-					new Object[]{o.getUID()});
+			VirtualizerStore store = store(o, false);
+			if (store == null)
+			{
+				throw 
+					new JRRuntimeException(
+						EXCEPTION_MESSAGE_KEY_STORE_NOT_FOUND,
+						new Object[]{o.getUID()});
+			}
+			
+			store.retrieve(o, !isReadOnly(o), serializer);
 		}
-		
-		store.retrieve(o, !isReadOnly(o), serializer);
+		finally 
+		{
+			o.getContext().unlock();
+		}
 	}
 
 	@Override
 	protected void dispose(JRVirtualizable o)
 	{
-		VirtualizerStore store = store(o, false);
-		if (store == null)
+		o.getContext().lock();
+		try 
 		{
-			if (log.isTraceEnabled())
+			VirtualizerStore store = store(o, false);
+			if (store == null)
 			{
-				log.trace("no store found for " + o.getUID() + " for disposal");
+				if (log.isTraceEnabled())
+				{
+					log.trace("no store found for " + o.getUID() + " for disposal");
+				}
+				// not failing
+				return;
 			}
-			// not failing
-			return;
+	
+			store.remove(o.getUID());
 		}
-
-		store.remove(o.getUID());
+		finally 
+		{
+			o.getContext().unlock();
+		}
 	}
 	
 	@Override
@@ -160,7 +213,27 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 			
 			if (store != null)
 			{
-				store.dispose();
+				boolean usedByOtherContexts = false;
+				for(Map.Entry<JRVirtualizationContext, VirtualizerStore> e : contextStores.entrySet()) 
+				{
+					if(!e.getKey().equals(context) && e.getValue().equals(store)) 
+					{
+						if (log.isDebugEnabled())
+						{
+							log.debug("found " + store + " used by other context " + context + " (will not dispose)");
+						}
+						usedByOtherContexts = true;
+					}
+				}
+				
+				if(!usedByOtherContexts) {
+					
+					store.dispose();
+					// another check here, if the swap is closed, it probably is best to remove it from the map of stores
+					if(store != null && isDisposedForRemoval(store)) {
+						contextStores.remove(context);
+					}
+				}
 			}
 		}
 		finally
@@ -177,7 +250,8 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 			log.debug("disposing " + this);
 		}
 
-		synchronized (contextStores)
+		contextStoresLock.lock();
+		try
 		{
 			for (Iterator<?> it = contextStores.values().iterator(); it.hasNext();)
 			{
@@ -186,6 +260,10 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 			}
 
 			contextStores.clear();
+		}
+		finally 
+		{
+			contextStoresLock.unlock();
 		}
 	}
 }
