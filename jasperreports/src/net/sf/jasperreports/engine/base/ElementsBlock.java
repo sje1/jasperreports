@@ -24,7 +24,6 @@
 package net.sf.jasperreports.engine.base;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -42,6 +41,8 @@ import net.sf.jasperreports.engine.fill.JRVirtualizationContext;
 import net.sf.jasperreports.engine.fill.VirtualizationObjectInputStream;
 import net.sf.jasperreports.engine.fill.VirtualizationObjectOutputStream;
 import net.sf.jasperreports.engine.util.DeepPrintElementCounter;
+import net.sf.jasperreports.engine.util.ReusableByteArray;
+import net.sf.jasperreports.engine.util.ReusableByteArrayOutputStream;
 
 /**
  * @author Lucian Chirita (lucianc@users.sourceforge.net)
@@ -439,12 +440,15 @@ public class ElementsBlock implements JRVirtualizable<VirtualElementsData>, Elem
 		context = (JRVirtualizationContext) in.readObject();
 		
 		int length = in.readInt();
-		//FIXME put a limit on the buffer
-		byte[] buffer = new byte[length];
-		in.readFully(buffer);
-		ByteArrayInputStream inputStream = new ByteArrayInputStream(buffer, 0, buffer.length);
-		VirtualizationObjectInputStream elementsStream = new VirtualizationObjectInputStream(inputStream, context);
-		elements = (List<JRPrintElement>) elementsStream.readObject();
+		byte[] buffer = ReusableByteArray.getByteArray(length);
+		in.readFully(buffer, 0, length);
+		try(ByteArrayInputStream inputStream = new ByteArrayInputStream(buffer, 0, length))
+		{
+			try(VirtualizationObjectInputStream elementsStream = new VirtualizationObjectInputStream(inputStream, context))
+			{
+				elements = (List<JRPrintElement>) elementsStream.readObject();
+			}
+		}
 		size = elements.size();
 		
 		if (!elements.isEmpty())
@@ -453,7 +457,6 @@ public class ElementsBlock implements JRVirtualizable<VirtualElementsData>, Elem
 		}
 	}
 
-	
 	private void writeObject(java.io.ObjectOutputStream out) throws IOException
 	{
 		lockContext();
@@ -469,14 +472,16 @@ public class ElementsBlock implements JRVirtualizable<VirtualElementsData>, Elem
 				out.writeObject(uid);
 				out.writeObject(context);
 
-				ByteArrayOutputStream bout = new ByteArrayOutputStream();
-				VirtualizationObjectOutputStream stream = new VirtualizationObjectOutputStream(bout, context);
-				stream.writeObject(elements);
-				stream.flush();
-
-				byte[] bytes = bout.toByteArray();
-				out.writeInt(bytes.length);
-				out.write(bytes);
+				try(ReusableByteArrayOutputStream bout = ReusableByteArrayOutputStream.get())
+				{
+					try(VirtualizationObjectOutputStream stream = new VirtualizationObjectOutputStream(bout, context))
+					{
+						stream.writeObject(elements);
+						stream.flush();
+					}
+					out.writeInt(bout.size());
+					out.write(bout.myInternalBuffer(), 0, bout.size());
+				}
 			}
 			finally
 			{

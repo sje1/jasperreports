@@ -45,6 +45,11 @@ public class SwapFileVirtualizerStoreFactory implements VirtualizerStoreFactory
 	 * request a pageIn of a handle it has in the store later.
 	 */
 	private boolean disposeOnlyWithEmptyHandles = false;
+	
+	/**
+	 * Enable stats for monitoring on the stores created by this factory
+	 */
+	private boolean statsEnabled = false;
 
 	@Override
 	public VirtualizerStore createStore(JRVirtualizationContext virtualizationContext)
@@ -52,6 +57,7 @@ public class SwapFileVirtualizerStoreFactory implements VirtualizerStoreFactory
 		JRSwapFile swapFile = new JRSwapFile(directory, blockSize, minGrowCount);
 		SwapFileVirtualizerStore store = new SwapFileVirtualizerStore(swapFile, true, compression);
 		store.setDisposeOnlyWithEmptyHandles(disposeOnlyWithEmptyHandles);
+		store.setStatsEnabled(statsEnabled);
 		return store;
 	}
 
@@ -103,5 +109,15 @@ public class SwapFileVirtualizerStoreFactory implements VirtualizerStoreFactory
 	public void setDisposeOnlyWithEmptyHandles(boolean disposeOnlyWithEmptyHandles) 
 	{
 		this.disposeOnlyWithEmptyHandles = disposeOnlyWithEmptyHandles;
+	}
+
+	public boolean isStatsEnabled() 
+	{
+		return statsEnabled;
+	}
+
+	public void setStatsEnabled(boolean statsEnabled) 
+	{
+		this.statsEnabled = statsEnabled;
 	}
 }

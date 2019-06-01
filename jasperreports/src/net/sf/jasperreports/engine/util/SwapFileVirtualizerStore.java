@@ -24,7 +24,6 @@
 package net.sf.jasperreports.engine.util;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -112,13 +111,18 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 			{
 				log.trace("object " + o.getUID() + " already stored");
 			}
+			if(statsEnabled)
+			{
+				storeStats.isstored++;
+				globalStats.isstored++;
+			}
 			return false;
 		}
 		
-		try
-		{
-			ByteArrayOutputStream bout = new ByteArrayOutputStream(3000);
-			OutputStream out = compression == null ? bout : compression.compressedOutput(bout);
+		long start = statsEnabled ? System.nanoTime() : 0;
+		ReusableByteArrayOutputStream bout = ReusableByteArrayOutputStream.get();
+		OutputStream out = compression == null ? bout : compression.compressedOutput(bout);
+		try {
 			serializeLock.lock(); // need to lock here for thread safety
 			try {
 				serializer.writeData(o, out);
@@ -126,25 +130,37 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 				serializeLock.unlock();
 			}
 			out.close();
-			
-			byte[] data = bout.toByteArray();
-			if (log.isTraceEnabled())
-			{
-				log.trace("writing " + data.length + " for object " + o.getUID() + " to " + swap);
-			}
-			
-			JRSwapFile.SwapHandle handle = swap.write(data);
+			long end = statsEnabled ? recordSerializeWrite(start) : 0; 
+
+			start = statsEnabled ? System.nanoTime() : 0;
+			byte[] data = bout.myInternalBuffer();
+			int length = bout.size();
+			JRSwapFile.SwapHandle handle = swap.write(data, length);
+			end = statsEnabled ? recordWrite(start, length) : 0;
 			handles.put(o.getUID(), handle);
 			return true;
 		}
 		catch (IOException e)
 		{
-			log.error("Error virtualizing object " + o.getUID() + " to " + swap, e);
-			throw 
-				new JRRuntimeException(
-					EXCEPTION_MESSAGE_KEY_VIRTUALIZING_ERROR,
-					(Object[])null,
-					e);
+				log.error("Error virtualizing object " + o.getUID() + " to " + swap, e);
+				throw 
+					new JRRuntimeException(
+						EXCEPTION_MESSAGE_KEY_VIRTUALIZING_ERROR,
+						(Object[])null,
+						e);
+		} 
+		finally 
+		{
+			if(out != null) 
+			{
+				try 
+				{
+					out.close();
+				} catch(Exception ex) 
+				{
+					
+				}
+			}
 		}
 	}
 	
@@ -163,18 +179,48 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 					(Object[])null);
 		}
 		
+		JRSwapFile.ReadResult data = null;
 		try
 		{
-			byte[] data = swap.read(handle, remove);
+			long start = statsEnabled ? System.nanoTime() : 0;
+			data = swap.read(handle, remove);
 			if (log.isTraceEnabled())
 			{
-				log.trace("read " + data.length + " for object " + o.getUID() + " from " + swap);
+				log.trace("read " + data.totalLength + " for object " + o.getUID() + " from " + swap);
 			}
+			long end = statsEnabled ? recordSwapRead(start) : 0; 
 			
-			ByteArrayInputStream rawInput = new ByteArrayInputStream(data);
-			InputStream input = compression == null ? rawInput : compression.uncompressedInput(rawInput);
-			serializer.readData(o, input);
-			input.close();
+			start = statsEnabled ? System.nanoTime() : 0;
+			ByteArrayInputStream rawInput = new ByteArrayInputStream(data.data, 0, data.totalLength);
+			try 
+			{
+				InputStream input = compression == null ? rawInput : compression.uncompressedInput(rawInput);
+				try {
+					serializer.readData(o, input);
+				} finally {
+					if(compression != null) 
+					{
+						try 
+						{
+							input.close();
+						} 
+						catch(Exception ex) {
+							
+						}
+					}
+				}
+			} finally 
+			{
+				try 
+				{
+					rawInput.close();
+				} 
+				catch(Exception ex) 
+				{
+					
+				}
+			}
+			end = statsEnabled ? recordRead(start, data.data.length) : 0; 
 		}
 		catch (IOException e)
 		{
@@ -271,5 +317,141 @@ public class SwapFileVirtualizerStore implements VirtualizerStore
 			swap.dispose();
 		}
 		disposed = true;
+	}
+
+	/**
+	 * Can be set to enable keep basic stats (counters) of bytes, reads, writes, and durations for the store
+	 * This could be used by tests or runtime monitoring of a jasper system, such as via JMX
+	 * The overhead of keeping these counts intends to be minimal and ok for production. 
+	 */
+	private boolean statsEnabled = false;
+	
+	/**
+	 * Stats for this store
+	 */
+	private SwapFileVirtualizerStoreStats storeStats = new SwapFileVirtualizerStoreStats();
+	
+	/**
+	 * Global stats for the the lifetime of the JVM across all stores 
+	 */
+	private static final SwapFileVirtualizerStoreStats globalStats = new SwapFileVirtualizerStoreStats();
+	
+	private long recordRead(long startNanos, int dataLength) 
+	{
+		long endNanos = System.nanoTime();
+		storeStats.reads++;
+		globalStats.reads++;
+		storeStats.readBytes += dataLength;
+		globalStats.readBytes += dataLength;
+		storeStats.readSerializerNanos += (endNanos-startNanos);
+		globalStats.readSerializerNanos += (endNanos-startNanos);
+		return endNanos;
+	}
+	
+	private long recordSwapRead(long startNanos) 
+	{
+		long end = System.nanoTime();
+		storeStats.readSwapNanos += (end-startNanos);
+		globalStats.readSwapNanos += (end-startNanos);
+		return end;
+	}
+	
+	private long recordWrite(long startNanos, int length) 
+	{
+		long end = System.nanoTime();
+		storeStats.stored++;
+		globalStats.stored++;
+		storeStats.storedBytes += length;
+		globalStats.storedBytes += length;
+		storeStats.storeSwapNanos += (end-startNanos);
+		globalStats.storeSwapNanos += (end-startNanos);
+		return end;
+	}
+	
+	private long recordSerializeWrite(long startNanos) 
+	{
+		long end = System.nanoTime();
+		storeStats.storeSerializerNanos += (end-startNanos);
+		globalStats.storeSerializerNanos += (end-startNanos);
+		return end;
+	}
+	
+	void setStatsEnabled(boolean statsEnabled) 
+	{
+		this.statsEnabled = statsEnabled;
+	}
+	
+	/**
+	 * Keep some stats 
+	 */
+	public static class SwapFileVirtualizerStoreStats 
+	{
+		private int stored = 0;
+		private int isstored = 0;
+		private long storedBytes = 0;
+		private long storeSerializerNanos = 0;
+		private long storeSwapNanos = 0;
+		private int reads = 0;
+		private long readBytes = 0;
+		private long readSerializerNanos = 0;
+		private long readSwapNanos = 0;
+	
+		public void resetStats() {
+			stored = 0;
+			isstored = 0;
+			storedBytes = 0;
+			storeSerializerNanos = 0;
+			storeSwapNanos = 0;
+			reads = 0;
+			readBytes = 0;
+			readSerializerNanos = 0;
+			readSwapNanos = 0;
+		}
+		
+		public double storeHitRatio() {
+			return isstored / stored;
+		}
+		public long storedBytes() {
+			return storedBytes;
+		}
+		public double averageStoredBytes() {
+			return storedBytes / stored;
+		}
+		public long readBytes() {
+			return readBytes;
+		}
+		public double averageReadBytes() {
+			return readBytes / reads;
+		}
+		public long serializeNanos() { 
+			return storeSerializerNanos;
+		}
+		public long deserializeNanos() { 
+			return readSerializerNanos;
+		}
+		public long writeNanos() { 
+			return storeSwapNanos;
+		}
+		public long readNanos() { 
+			return readSwapNanos;
+		}
+	}
+	
+	/**
+	 * The stats for this store. One store maps to one swap file, so the stats are just for the one swap file.
+	 * @return SwapFileVirtualizerStoreStats the stats object
+	 */
+	public SwapFileVirtualizerStoreStats getStoreStats() 
+	{
+		return storeStats;
+	}
+	
+	/**
+	 * The stats for the instance (aggregates across all stores for the lifetime of the JVM)
+	 * @return SwapFileVirtualizerStoreStats the stats object
+	 */
+	public SwapFileVirtualizerStoreStats getGlobalStats() 
+	{
+		return globalStats;
 	}
 }

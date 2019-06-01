@@ -266,4 +266,8 @@ public class StoreFactoryVirtualizer extends JRAbstractLRUVirtualizer
 			contextStoresLock.unlock();
 		}
 	}
+	
+	VirtualizerStore getExistingStore(JRVirtualizationContext context) {
+		return contextStores.get(context);
+	}
 }

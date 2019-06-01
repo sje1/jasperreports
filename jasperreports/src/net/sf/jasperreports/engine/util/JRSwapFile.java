@@ -142,6 +142,11 @@ public class JRSwapFile
 		return "JRSwapFile " + swapFile.getAbsolutePath();
 	}
 
+	public SwapHandle write(byte[] data) throws IOException
+	{
+		return write(data, data.length);
+	}
+
 	/**
 	 * Allocates an area in the swap file and writes data in it.
 	 * 
@@ -149,13 +154,13 @@ public class JRSwapFile
 	 * @return a handle to the allocated area
 	 * @throws IOException
 	 */
-	public SwapHandle write(byte[] data) throws IOException
+	public SwapHandle write(byte[] data, int length) throws IOException
 	{
 		synchronized (this)
 		{
-			int blockCount = (data.length - 1) / blockSize + 1;
+			int blockCount = (length - 1) / blockSize + 1;
 			long[] offsets = reserveFreeBlocks(blockCount);
-			int lastBlockSize = (data.length - 1) % blockSize + 1;
+			int lastBlockSize = (length - 1) % blockSize + 1;
 			SwapHandle handle = new SwapHandle(offsets, lastBlockSize);
 			for (int i = 0; i < blockCount; ++i)
 			{
@@ -178,7 +183,38 @@ public class JRSwapFile
 		}
 	}
 
-	
+	/**
+	 * A result containing the read result byte array and length.
+	 * Note that the array may not be the result length, so use getLength() to find the used length.
+	 * This is to support re-use of arrays.  
+	 */
+	public static class ReadResult {
+		public byte[] data;
+		public int totalLength;
+		
+		ReadResult(byte[] data, int totalLength) 
+		{
+			this.data = data;
+			this.totalLength = totalLength;
+		}
+		
+		public int getLength() 
+		{
+			return totalLength;
+		}
+		
+		/**
+		 * The data
+		 * Note the array length is not the data length.
+		 * Call getLength() to get the data length.
+		 * @return byte[] The array containing the read data
+		 */
+		public byte[] getData() 
+		{
+			return data;
+		}
+	}
+
 	/**
 	 * Reads all the data from an allocated area.
 	 * 
@@ -187,12 +223,11 @@ public class JRSwapFile
 	 * @return the whole data saved in an allocated area
 	 * @throws IOException
 	 */
-	public byte[] read(SwapHandle handle, boolean free) throws IOException
+	public ReadResult read(SwapHandle handle, boolean free) throws IOException
 	{
 		long[] offsets = handle.getOffsets();
 		int totalLength = (offsets.length - 1) * blockSize + handle.getLastSize();
-		byte[] data = new byte[totalLength];
-		
+		byte[] data = ReusableByteArray.getByteArray(totalLength);
 		for (int i = 0; i < offsets.length; ++i)
 		{
 			int dataOffset = i * blockSize;
@@ -205,9 +240,8 @@ public class JRSwapFile
 			freeBlocks(offsets);
 		}
 		
-		return data;
+		return new ReadResult(data, totalLength);
 	}
-
 
 	protected void read(byte[] data, int dataOffset, int dataLength, long fileOffset) throws IOException
 	{
@@ -441,6 +475,13 @@ public class JRSwapFile
 		public int getLastSize()
 		{
 			return lastSize;
+		}
+		
+		public int getTotalLength(int blockSize) 
+		{
+			long[] offsets = getOffsets();
+			int totalLength = (offsets.length - 1) * blockSize + getLastSize();
+			return totalLength;
 		}
 	}
 }
